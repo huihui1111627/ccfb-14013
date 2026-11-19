@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>软控制器监控台</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2129; --line:#2a3542; --fg:#d7e0ea; --dim:#7d8da0;
+          --accent:#3b9eff; --warn:#ff5c5c; --ok:#3fd07f; --amber:#ffb547; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",monospace; }
+  header { padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  .badge { padding:3px 10px; border-radius:12px; font-size:12px; border:1px solid var(--line); }
+  .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .badge.trip { color:var(--warn); border-color:var(--warn); animation:blink 1s infinite; }
+  .badge.force { color:var(--amber); border-color:var(--amber); }
+  @keyframes blink { 50% { opacity:.35; } }
+  main { padding:18px 20px; display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .panel h2 { margin:0; padding:11px 16px; font-size:14px; border-bottom:1px solid var(--line);
+              display:flex; justify-content:space-between; align-items:center; }
+  .panel .body { padding:12px 16px; max-height:62vh; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--dim); font-weight:600; position:sticky; top:0; background:var(--panel); }
+  td.val { color:var(--accent); }
+  tr.forced { background:rgba(255,92,92,.12); }
+  tr.forced td.name { color:var(--warn); font-weight:bold; }
+  .tag { font-size:11px; padding:1px 7px; border-radius:8px; border:1px solid var(--line); color:var(--dim); }
+  .tag.io { color:var(--accent); border-color:var(--accent); }
+  .tag.fb { color:var(--amber); border-color:var(--amber); }
+  .force-flag { color:var(--warn); font-weight:bold; animation:blink 1.2s infinite; }
+  input,button { font:inherit; background:#0d1218; color:var(--fg);
+                 border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.danger { color:var(--warn); }
+  .ctrl { display:flex; gap:6px; }
+  .ctrl input { width:90px; }
+  .full { grid-column:1 / -1; }
+  .muted { color:var(--dim); }
+  .num { text-align:right; }
+</style>
+</head>
+<body>
+<header>
+  <h1>软控制器监控台</h1>
+  <span class="badge" id="clock">t=--</span>
+  <span class="badge ok" id="wd">看门狗正常</span>
+  <span class="badge force" id="fc">强制点 0</span>
+  <span class="muted" style="font-size:12px">每 1s 自动刷新</span>
+</header>
+<main>
+  <section class="panel full">
+    <h2>任务执行耗时与抖动</h2>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>任务</th><th>优先级</th><th>周期</th><th>状态</th><th class="num">执行拍数</th>
+          <th class="num">最近耗时</th><th class="num">最大耗时</th><th class="num">平均耗时</th>
+          <th class="num">唤醒抖动 min/mean/max</th><th class="num">抖动σ</th><th class="num">看门狗动作</th>
+        </tr></thead>
+        <tbody id="tasks"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>变量实时值（强制点红色闪烁标记）
+      <span class="muted" style="font-weight:400;font-size:12px">对 I/O 点可强制/解除</span>
+    </h2>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>变量</th><th>类型</th><th>分类</th><th>实时值</th><th>强制</th><th>操作（仅 I/O 点）</th>
+        </tr></thead>
+        <tbody id="vars"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+async function getJSON(u){ const r = await fetch(u); return r.json(); }
+async function postJSON(u, body){
+  const r = await fetch(u, {method:'POST', headers:{'Content-Type':'application/json'},
+                            body: JSON.stringify(body)});
+  if(!r.ok){ alert((await r.text())); return null; }
+  return r.json();
+}
+
+async function refreshStatus(){
+  const st = await getJSON('/api/status');
+  document.getElementById('clock').textContent = 't=' + st.now;
+  const wd = document.getElementById('wd');
+  if(st.watchdogTripped){ wd.className='badge trip'; wd.textContent='看门狗已动作'; }
+  else { wd.className='badge ok'; wd.textContent='看门狗正常'; }
+  const fc = document.getElementById('fc');
+  fc.textContent = '强制点 ' + st.forcedCount;
+  fc.style.display = st.forcedCount > 0 ? '' : 'none';
+}
+
+async function refreshTasks(){
+  const ts = await getJSON('/api/tasks');
+  document.getElementById('tasks').innerHTML = ts.map(t => `
+    <tr>
+      <td>${t.name}</td><td class="num">${t.priority}</td><td>${t.periodText}</td>
+      <td>${t.state}</td><td class="num">${t.runs}</td>
+      <td class="num">${t.lastExecText}</td><td class="num">${t.maxExecText}</td>
+      <td class="num">${t.meanExecText}</td>
+      <td class="num">${t.jitterMinText} / ${t.jitterMeanText} / ${t.jitterMaxText}</td>
+      <td class="num">${t.jitterStdText}</td>
+      <td class="num">${t.deadlines}</td>
+    </tr>`).join('');
+}
+
+async function refreshVars(){
+  const vs = await getJSON('/api/vars');
+  document.getElementById('vars').innerHTML = vs.map(v => {
+    const ioTag = v.isIO ? `<span class="tag io">${v.kind}</span>`
+               : (v.kind==='FB' ? `<span class="tag fb">FB</span>` : `<span class="tag">${v.kind}</span>`);
+    const forceCell = v.forced ? `<span class="force-flag">● 强制中</span>` : '';
+    const ctrl = v.isIO ? `
+      <div class="ctrl">
+        <input id="fv_${v.name}" placeholder="强制值">
+        <button onclick="doForce('${v.name}')">强制</button>
+        <button class="danger" onclick="doUnforce('${v.name}')">解除</button>
+      </div>` : '<span class="muted">—</span>';
+    return `<tr class="${v.forced ? 'forced' : ''}">
+      <td class="name">${v.name}</td><td>${v.type}</td><td>${ioTag}</td>
+      <td class="val">${v.value}</td><td>${forceCell}</td><td>${ctrl}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function doForce(name){
+  const el = document.getElementById('fv_' + name);
+  const val = el.value.trim();
+  if(!val){ alert('请输入强制值（BOOL: TRUE/FALSE，数值/时间字面量）'); return; }
+  await postJSON('/api/force', {name, value: val});
+  refreshVars(); refreshStatus();
+}
+async function doUnforce(name){
+  await postJSON('/api/unforce', {name});
+  refreshVars(); refreshStatus();
+}
+
+function tickAll(){ refreshStatus(); refreshTasks(); refreshVars(); }
+tickAll();
+setInterval(tickAll, 1000);
+</script>
+</body>
+</html>
